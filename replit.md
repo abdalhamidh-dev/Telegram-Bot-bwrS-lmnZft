@@ -35,8 +35,9 @@ A Python Telegram group bot that connects securely to Telegram and removes obvio
 
 ## Product
 
-- Responds to `/start`, `/help`, `/rules`, and `/modstatus`.
-- Removes obvious scam links, repeated flood messages, and aggressive all-caps spam when it has Telegram delete permission.
+- Responds to `/start`, `/help`, `/rules`, `/modstatus`, and reply-based `/ban`.
+- Removes links, obvious scam messages, repeated flood messages, and aggressive all-caps spam when it has Telegram delete permission.
+- Lets group administrators ban a user by replying to that user's message with `/ban`.
 - Never moderates group admins.
 
 ## User preferences

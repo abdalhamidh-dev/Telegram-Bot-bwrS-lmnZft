@@ -125,6 +125,9 @@ class GroupModerator:
         self.api = api
         self.bot_id = bot_id
         self.admin_cache: dict[tuple[int, int], tuple[float, bool]] = {}
+        self.bot_permission_cache: dict[
+            int, tuple[float, bool, bool]
+        ] = {}
         self.recent_messages: defaultdict[
             tuple[int, int], deque[tuple[float, str]]
         ] = defaultdict(deque)
@@ -149,8 +152,7 @@ class GroupModerator:
         return result
 
     def bot_can_delete(self, chat_id: int) -> bool:
-        key = (chat_id, self.bot_id)
-        cached = self.admin_cache.get(key)
+        cached = self.bot_permission_cache.get(chat_id)
         if cached and cached[0] > time.monotonic():
             return cached[1]
 
@@ -160,12 +162,25 @@ class GroupModerator:
                 {"chat_id": chat_id, "user_id": self.bot_id},
             )
             result = can_delete_messages(member or {})
+            can_ban = can_restrict_members(member or {})
         except TelegramError as error:
             logger.warning("Could not inspect bot permissions: %s", error)
             result = False
+            can_ban = False
 
-        self.admin_cache[key] = (time.monotonic() + ADMIN_CACHE_SECONDS, result)
+        self.bot_permission_cache[chat_id] = (
+            time.monotonic() + ADMIN_CACHE_SECONDS,
+            result,
+            can_ban,
+        )
         return result
+
+    def bot_can_ban(self, chat_id: int) -> bool:
+        cached = self.bot_permission_cache.get(chat_id)
+        if cached and cached[0] > time.monotonic():
+            return cached[2]
+        self.bot_can_delete(chat_id)
+        return self.bot_permission_cache.get(chat_id, (0, False, False))[2]
 
     def is_flood(self, chat_id: int, user_id: int, text: str) -> bool:
         key = (chat_id, user_id)
@@ -181,25 +196,30 @@ class GroupModerator:
         messages.append((now, normalized))
         return same_text_count >= 1 or len(messages) >= 5
 
-    def should_remove(self, message: dict[str, Any]) -> bool:
+    def removal_reason(self, message: dict[str, Any]) -> str | None:
         text = (message.get("text") or "").strip()
         sender = message.get("from") or {}
         if not text or sender.get("is_bot"):
-            return False
+            return None
 
         chat_id = message["chat"]["id"]
         user_id = sender.get("id")
         if user_id is None or self.member_is_admin(chat_id, user_id):
-            return False
+            return None
 
-        return looks_like_spam(text) or self.is_flood(chat_id, user_id, text)
+        if URL_PATTERN.search(text):
+            return "link"
+        if looks_like_spam(text) or self.is_flood(chat_id, user_id, text):
+            return "spam"
+        return None
 
-    def moderate(self, message: dict[str, Any]) -> None:
+    def moderate(self, message: dict[str, Any]) -> str | None:
         chat_id = message["chat"]["id"]
         if not self.bot_can_delete(chat_id):
-            return
-        if not self.should_remove(message):
-            return
+            return None
+        reason = self.removal_reason(message)
+        if reason is None:
+            return None
 
         try:
             self.api.call(
@@ -211,8 +231,17 @@ class GroupModerator:
                 chat_id,
                 message["message_id"],
             )
+            return reason
         except TelegramError as error:
             logger.warning("Could not remove message: %s", error)
+            return None
+
+
+def can_restrict_members(member: dict[str, Any]) -> bool:
+    return member.get("status") == "creator" or (
+        member.get("status") == "administrator"
+        and member.get("can_restrict_members") is True
+    )
 
 
 def send_message(api: TelegramBridge, chat_id: int, text: str, reply_to: int | None = None) -> None:
@@ -240,8 +269,9 @@ def handle_message(
         send_message(
             api,
             chat_id,
-            f"Hi {first_name}! I’m ready to help keep this group clear of obvious spam.\n\n"
-            "Use /help to see what I can do.",
+            f"أهلاً بك يا {first_name}! أنا بوت حماية المجموعات.\n"
+            "أضفني كمشرف وسأقوم بعملي.\n\n"
+            "استخدم /help لمعرفة الأوامر المتاحة.",
             reply_to,
         )
         return
@@ -250,10 +280,55 @@ def handle_message(
         send_message(
             api,
             chat_id,
-            "Commands:\n/start — start the bot\n/help — show this help\n"
-            "/rules — show moderation rules\n/modstatus — show moderation status",
+            "الأوامر المتاحة:\n/start — بدء البوت\n/help — عرض المساعدة\n"
+            "/rules — عرض قواعد الحماية\n/modstatus — حالة الحماية\n"
+            "/ban — حظر مستخدم بالرد على رسالته",
             reply_to,
         )
+        return
+
+    if command == "/ban":
+        if not is_group(message):
+            send_message(api, chat_id, "هذا الأمر متاح داخل المجموعات فقط.", reply_to)
+            return
+
+        caller_id = (message.get("from") or {}).get("id")
+        replied_message = message.get("reply_to_message")
+        target_user = (replied_message or {}).get("from") or {}
+        if caller_id is None or not moderator.member_is_admin(chat_id, caller_id):
+            send_message(api, chat_id, "هذا الأمر متاح لمشرفي المجموعة فقط.", reply_to)
+            return
+        if not replied_message or not target_user.get("id"):
+            send_message(api, chat_id, "رد على رسالة الشخص الذي تريد حظره.", reply_to)
+            return
+        if target_user.get("is_bot") or moderator.member_is_admin(
+            chat_id, target_user["id"]
+        ):
+            send_message(api, chat_id, "لا يمكنني حظر مشرف أو بوت.", reply_to)
+            return
+        if not moderator.bot_can_ban(chat_id):
+            send_message(
+                api,
+                chat_id,
+                "خطأ: تأكد أنني مشرف وأملك صلاحيات الحظر.",
+                reply_to,
+            )
+            return
+
+        try:
+            api.call(
+                "banChatMember",
+                {"chat_id": chat_id, "user_id": target_user["id"]},
+            )
+            send_message(api, chat_id, "تم حظر المستخدم بنجاح.", reply_to)
+        except TelegramError as error:
+            logger.warning("Could not ban user in chat %s: %s", chat_id, error)
+            send_message(
+                api,
+                chat_id,
+                "خطأ: تأكد أنني مشرف وأملك صلاحيات الحظر.",
+                reply_to,
+            )
         return
 
     if command == "/rules":
@@ -276,7 +351,15 @@ def handle_message(
         return
 
     if is_group(message):
-        moderator.moderate(message)
+        reason = moderator.moderate(message)
+        if reason == "link":
+            username = (message.get("from") or {}).get("username")
+            mention = f"@{username}" if username else first_name
+            send_message(
+                api,
+                chat_id,
+                f"{mention} ممنوع إرسال الروابط!",
+            )
         return
 
     send_message(
