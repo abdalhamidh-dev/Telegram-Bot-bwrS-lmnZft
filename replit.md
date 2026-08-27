@@ -1,6 +1,6 @@
-# [Project name]
+# Telegram Bot
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A Telegram bot starter that connects securely to Telegram, responds to core commands, and provides a clean foundation for custom workflows.
 
 ## Run & Operate
 
@@ -22,15 +22,21 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/api-server/src/lib/telegram.ts` — Telegram client, polling loop, command handlers, and bot status.
+- `artifacts/api-server/src/routes/telegram.ts` — status and manual start endpoints.
+- `artifacts/api-server/src/routes/health.ts` — API health check.
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Telegram calls use the Replit-managed Telegram connection; bot credentials never enter application code or chat.
+- The starter uses long polling so it works immediately in the development workflow without requiring a public webhook URL.
+- Update offsets are held in memory for the starter build; persistent state can be added when the bot's product workflow is defined.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Responds to `/start`, `/help`, and `/about`.
+- Echoes non-command text with a prompt for the next custom workflow.
+- Exposes bot connection status at `/api/telegram/status`.
 
 ## User preferences
 
@@ -38,7 +44,8 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Only one polling loop should run against a Telegram bot token at a time.
+- Telegram long polling and webhooks are mutually exclusive; this starter intentionally uses polling.
 
 ## Pointers
 
