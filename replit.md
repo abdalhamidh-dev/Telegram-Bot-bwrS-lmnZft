@@ -1,6 +1,6 @@
 # Telegram Bot
 
-A Telegram bot starter that connects securely to Telegram, responds to core commands, and provides a clean foundation for custom workflows.
+A Python Telegram group bot that connects securely to Telegram and removes obvious spam while keeping group administration in the hands of human admins.
 
 ## Run & Operate
 
@@ -22,21 +22,22 @@ A Telegram bot starter that connects securely to Telegram, responds to core comm
 
 ## Where things live
 
-- `artifacts/api-server/src/lib/telegram.ts` — Telegram client, polling loop, command handlers, and bot status.
-- `artifacts/api-server/src/routes/telegram.ts` — status and manual start endpoints.
+- `group-bot/bot.py` — Python polling loop, group moderation rules, and command handlers.
+- `group-bot/telegram_bridge.mjs` — small authenticated connector bridge used by the Python runtime.
 - `artifacts/api-server/src/routes/health.ts` — API health check.
 
 ## Architecture decisions
 
 - Telegram calls use the Replit-managed Telegram connection; bot credentials never enter application code or chat.
-- The starter uses long polling so it works immediately in the development workflow without requiring a public webhook URL.
-- Update offsets are held in memory for the starter build; persistent state can be added when the bot's product workflow is defined.
+- Moderation logic runs in Python, while the bridge keeps the authenticated Replit connector in a local Node process because the Python connector package is unavailable in this runtime.
+- The bot uses long polling so it works immediately without requiring a public webhook URL.
+- Update offsets and moderation caches are held in memory; persistent state can be added for larger groups.
 
 ## Product
 
-- Responds to `/start`, `/help`, and `/about`.
-- Echoes non-command text with a prompt for the next custom workflow.
-- Exposes bot connection status at `/api/telegram/status`.
+- Responds to `/start`, `/help`, `/rules`, and `/modstatus`.
+- Removes obvious scam links, repeated flood messages, and aggressive all-caps spam when it has Telegram delete permission.
+- Never moderates group admins.
 
 ## User preferences
 
@@ -46,6 +47,7 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 - Only one polling loop should run against a Telegram bot token at a time.
 - Telegram long polling and webhooks are mutually exclusive; this starter intentionally uses polling.
+- To moderate every group message, disable Group Privacy for the bot through BotFather and make the bot a group administrator with permission to delete messages.
 
 ## Pointers
 
