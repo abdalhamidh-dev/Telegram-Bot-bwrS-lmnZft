@@ -10,6 +10,8 @@ import sys
 import time
 from collections import defaultdict, deque
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 
 logging.basicConfig(
@@ -31,9 +33,16 @@ SCAM_PATTERN = re.compile(
 )
 URL_PATTERN = re.compile(r"(?:https?://|www\.|t\.me/)", re.IGNORECASE)
 INVITE_PATTERN = re.compile(r"(?:t\.me/(?:\+|joinchat)|telegram\.me/joinchat)", re.IGNORECASE)
+SIGHTENGINE_URL = "https://api.sightengine.com/1.0/check.json"
+SIGHTENGINE_USER = "1290792300"
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
 
 class TelegramError(RuntimeError):
+    pass
+
+
+class ImageModerationError(RuntimeError):
     pass
 
 
@@ -244,11 +253,136 @@ def can_restrict_members(member: dict[str, Any]) -> bool:
     )
 
 
+def download_telegram_file(file_path: str) -> bytes:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise ImageModerationError("TELEGRAM_BOT_TOKEN is not configured")
+
+    file_url = f"https://api.telegram.org/file/bot{token}/{file_path.lstrip('/')}"
+    try:
+        with urllib_request.urlopen(file_url, timeout=30) as response:
+            chunks: list[bytes] = []
+            total = 0
+            while chunk := response.read(1024 * 1024):
+                total += len(chunk)
+                if total > MAX_IMAGE_BYTES:
+                    raise ImageModerationError("Image is larger than 20 MB")
+                chunks.append(chunk)
+            return b"".join(chunks)
+    except urllib_error.URLError as error:
+        raise ImageModerationError(f"Could not download Telegram image: {error}") from error
+
+
+def build_multipart(fields: dict[str, str], file_bytes: bytes) -> tuple[bytes, str]:
+    boundary = f"----ReplitSightengine{int(time.time() * 1000)}"
+    boundary_bytes = boundary.encode()
+    body = bytearray()
+
+    for name, value in fields.items():
+        body.extend(b"--" + boundary_bytes + b"\r\n")
+        body.extend(
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
+        )
+        body.extend(value.encode())
+        body.extend(b"\r\n")
+
+    body.extend(b"--" + boundary_bytes + b"\r\n")
+    body.extend(
+        b'Content-Disposition: form-data; name="media"; filename="telegram-photo.jpg"\r\n'
+    )
+    body.extend(b"Content-Type: image/jpeg\r\n\r\n")
+    body.extend(file_bytes)
+    body.extend(b"\r\n--" + boundary_bytes + b"--\r\n")
+    return bytes(body), boundary
+
+
+def sightengine_detects_nudity(file_bytes: bytes) -> bool:
+    secret = os.getenv("SIGHTENGINE_SECRET")
+    if not secret:
+        raise ImageModerationError("SIGHTENGINE_SECRET is not configured")
+
+    body, boundary = build_multipart(
+        {
+            "models": "nudity-2.0",
+            "api_user": SIGHTENGINE_USER,
+            "api_secret": secret,
+        },
+        file_bytes,
+    )
+    request = urllib_request.Request(
+        SIGHTENGINE_URL,
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+
+    try:
+        with urllib_request.urlopen(request, timeout=45) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except (urllib_error.URLError, json.JSONDecodeError) as error:
+        raise ImageModerationError(f"Sightengine request failed: {error}") from error
+
+    if result.get("status") != "success":
+        raise ImageModerationError(
+            f"Sightengine rejected the image: {result.get('error', result)}"
+        )
+
+    nudity = result.get("nudity") or {}
+    sexual_display = float(nudity.get("sexual_display", 0))
+    erotica = float(nudity.get("erotica", 0))
+    return sexual_display > 0.5 or erotica > 0.5
+
+
 def send_message(api: TelegramBridge, chat_id: int, text: str, reply_to: int | None = None) -> None:
     body: dict[str, Any] = {"chat_id": chat_id, "text": text}
     if reply_to is not None:
         body["reply_parameters"] = {"message_id": reply_to}
     api.call("sendMessage", body)
+
+
+def check_photo(
+    api: TelegramBridge,
+    moderator: GroupModerator,
+    message: dict[str, Any],
+) -> None:
+    if not is_group(message) or not message.get("photo"):
+        return
+
+    chat_id = message["chat"]["id"]
+    sender = message.get("from") or {}
+    sender_id = sender.get("id")
+    if sender.get("is_bot") or sender_id is None:
+        return
+    if moderator.member_is_admin(chat_id, sender_id):
+        return
+    if not moderator.bot_can_delete(chat_id):
+        return
+
+    largest_photo = message["photo"][-1]
+    try:
+        file_info = api.call("getFile", {"file_id": largest_photo["file_id"]})
+        file_path = (file_info or {}).get("file_path")
+        if not file_path:
+            raise ImageModerationError("Telegram did not return an image path")
+
+        image_bytes = download_telegram_file(file_path)
+        if not sightengine_detects_nudity(image_bytes):
+            return
+
+        api.call(
+            "deleteMessage",
+            {"chat_id": chat_id, "message_id": message["message_id"]},
+        )
+        username = sender.get("username")
+        mention = f"@{username}" if username else sender.get("first_name", "المستخدم")
+        send_message(api, chat_id, f"⚠️ تم حذف صورة غير لائقة من {mention}")
+        logger.info(
+            "Removed an image flagged by Sightengine in chat %s (message %s)",
+            chat_id,
+            message["message_id"],
+        )
+    except (TelegramError, ImageModerationError) as error:
+        logger.warning("Could not scan Telegram image: %s", error)
 
 
 def handle_message(
@@ -418,7 +552,10 @@ def run() -> None:
                     message = update.get("message")
                     if message:
                         try:
-                            handle_message(api, moderator, message)
+                            if message.get("photo"):
+                                check_photo(api, moderator, message)
+                            else:
+                                handle_message(api, moderator, message)
                         except TelegramError as error:
                             logger.warning("Message handling failed: %s", error)
             except TelegramError as error:

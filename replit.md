@@ -37,6 +37,7 @@ A Python Telegram group bot that connects securely to Telegram and removes obvio
 
 - Responds to `/start`, `/help`, `/rules`, `/modstatus`, and reply-based `/ban`.
 - Removes links, obvious scam messages, repeated flood messages, and aggressive all-caps spam when it has Telegram delete permission.
+- Scans group photos with Sightengine `nudity-2.0` and removes images when `sexual_display` or `erotica` exceeds 50%.
 - Lets group administrators ban a user by replying to that user's message with `/ban`.
 - Never moderates group admins.
 
@@ -49,6 +50,7 @@ _Populate as you build — explicit user instructions worth remembering across s
 - Only one polling loop should run against a Telegram bot token at a time.
 - Telegram long polling and webhooks are mutually exclusive; this starter intentionally uses polling.
 - To moderate every group message, disable Group Privacy for the bot through BotFather and make the bot a group administrator with permission to delete messages.
+- Image scanning needs the `SIGHTENGINE_SECRET` and `TELEGRAM_BOT_TOKEN` secrets; both are stored outside the source code.
 
 ## Pointers
 
