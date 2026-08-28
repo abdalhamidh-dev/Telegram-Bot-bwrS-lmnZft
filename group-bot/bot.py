@@ -37,6 +37,19 @@ SIGHTENGINE_URL = "https://api.sightengine.com/1.0/check.json"
 SIGHTENGINE_USER = "1290792300"
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
+ARABIC_MENU = {
+    "inline_keyboard": [
+        [
+            {"text": "قواعد الحماية", "callback_data": "menu_rules"},
+            {"text": "حالة البوت", "callback_data": "menu_status"},
+        ],
+        [
+            {"text": "المساعدة", "callback_data": "menu_help"},
+            {"text": "طريقة الحظر", "callback_data": "menu_ban"},
+        ],
+    ]
+}
+
 
 class TelegramError(RuntimeError):
     pass
@@ -333,11 +346,114 @@ def sightengine_detects_nudity(file_bytes: bytes) -> bool:
     return sexual_display > 0.5 or erotica > 0.5
 
 
-def send_message(api: TelegramBridge, chat_id: int, text: str, reply_to: int | None = None) -> None:
+def send_message(
+    api: TelegramBridge,
+    chat_id: int,
+    text: str,
+    reply_to: int | None = None,
+    reply_markup: dict[str, Any] | None = None,
+) -> None:
     body: dict[str, Any] = {"chat_id": chat_id, "text": text}
     if reply_to is not None:
         body["reply_parameters"] = {"message_id": reply_to}
+    if reply_markup is not None:
+        body["reply_markup"] = reply_markup
     api.call("sendMessage", body)
+
+
+def menu_text(first_name: str) -> str:
+    return (
+        f"أهلاً بك يا {first_name}!\n\n"
+        "أنا بوت حماية المجموعات. اختر من القائمة ما تريد معرفته:"
+    )
+
+
+def edit_menu_message(
+    api: TelegramBridge,
+    callback_query: dict[str, Any],
+    text: str,
+) -> None:
+    callback_message = callback_query.get("message") or {}
+    chat = callback_message.get("chat") or {}
+    message_id = callback_message.get("message_id")
+    if not chat.get("id") or not message_id:
+        return
+
+    api.call(
+        "editMessageText",
+        {
+            "chat_id": chat["id"],
+            "message_id": message_id,
+            "text": text,
+            "reply_markup": {
+                "inline_keyboard": [
+                    [{"text": "العودة للقائمة", "callback_data": "menu_home"}]
+                ]
+            },
+        },
+    )
+
+
+def handle_callback_query(
+    api: TelegramBridge,
+    moderator: GroupModerator,
+    callback_query: dict[str, Any],
+) -> None:
+    callback_id = callback_query.get("id")
+    if callback_id:
+        api.call("answerCallbackQuery", {"callback_query_id": callback_id})
+
+    callback_message = callback_query.get("message") or {}
+    chat = callback_message.get("chat") or {}
+    chat_id = chat.get("id")
+    if not chat_id:
+        return
+
+    data = callback_query.get("data")
+    if data == "menu_home":
+        user = callback_query.get("from") or {}
+        edit_menu_message(api, callback_query, menu_text(user.get("first_name", "صديقي")))
+    elif data == "menu_rules":
+        edit_menu_message(
+            api,
+            callback_query,
+            "قواعد الحماية:\n"
+            "• حذف الروابط والرسائل المزعجة\n"
+            "• فحص الصور غير اللائقة\n"
+            "• منع تكرار الرسائل والإغراق\n"
+            "• تجاهل رسائل مشرفي المجموعة",
+        )
+    elif data == "menu_help":
+        edit_menu_message(
+            api,
+            callback_query,
+            "الأوامر المتاحة:\n"
+            "/start — فتح القائمة\n"
+            "/help — عرض المساعدة\n"
+            "/rules — عرض قواعد الحماية\n"
+            "/modstatus — حالة الحماية\n"
+            "/ban — حظر مستخدم بالرد على رسالته",
+        )
+    elif data == "menu_ban":
+        edit_menu_message(
+            api,
+            callback_query,
+            "لحظر مستخدم:\n"
+            "1. تأكد أنك مشرف في المجموعة.\n"
+            "2. اضغط مطولاً على رسالة المستخدم.\n"
+            "3. اختر الرد، ثم اكتب /ban.\n\n"
+            "يجب أن يكون لدي صلاحية حظر المستخدمين.",
+        )
+    elif data == "menu_status":
+        if chat.get("type") in {"group", "supergroup"}:
+            status = (
+                "نشطة — لدي صلاحية حذف الرسائل."
+                if moderator.bot_can_delete(chat_id)
+                else "قيد الانتظار — أضفني كمشرف مع صلاحية حذف الرسائل."
+            )
+        else:
+            status = "أضفني إلى مجموعة كمشرف لتفعيل الحماية."
+        edit_menu_message(api, callback_query, f"حالة الحماية: {status}")
 
 
 def check_photo(
@@ -403,10 +519,9 @@ def handle_message(
         send_message(
             api,
             chat_id,
-            f"أهلاً بك يا {first_name}! أنا بوت حماية المجموعات.\n"
-            "أضفني كمشرف وسأقوم بعملي.\n\n"
-            "استخدم /help لمعرفة الأوامر المتاحة.",
+            menu_text(first_name),
             reply_to,
+            ARABIC_MENU,
         )
         return
 
@@ -416,7 +531,8 @@ def handle_message(
             chat_id,
             "الأوامر المتاحة:\n/start — بدء البوت\n/help — عرض المساعدة\n"
             "/rules — عرض قواعد الحماية\n/modstatus — حالة الحماية\n"
-            "/ban — حظر مستخدم بالرد على رسالته",
+            "/ban — حظر مستخدم بالرد على رسالته\n\n"
+            "استخدم /start لفتح القائمة التفاعلية.",
             reply_to,
         )
         return
@@ -522,10 +638,11 @@ def run() -> None:
             "setMyCommands",
             {
                 "commands": [
-                    {"command": "start", "description": "Start the bot"},
-                    {"command": "help", "description": "Show available commands"},
-                    {"command": "rules", "description": "Show moderation rules"},
-                    {"command": "modstatus", "description": "Show moderation status"},
+                    {"command": "start", "description": "فتح القائمة الرئيسية"},
+                    {"command": "help", "description": "عرض المساعدة"},
+                    {"command": "rules", "description": "عرض قواعد الحماية"},
+                    {"command": "modstatus", "description": "حالة الحماية"},
+                    {"command": "ban", "description": "حظر مستخدم بالرد على رسالته"},
                 ]
             },
         )
@@ -549,15 +666,22 @@ def run() -> None:
                 ) or []
                 for update in updates:
                     offset = max(offset, update["update_id"])
-                    message = update.get("message")
-                    if message:
-                        try:
+                    try:
+                        if update.get("callback_query"):
+                            handle_callback_query(
+                                api,
+                                moderator,
+                                update["callback_query"],
+                            )
+                            continue
+                        message = update.get("message")
+                        if message:
                             if message.get("photo"):
                                 check_photo(api, moderator, message)
                             else:
                                 handle_message(api, moderator, message)
-                        except TelegramError as error:
-                            logger.warning("Message handling failed: %s", error)
+                    except TelegramError as error:
+                        logger.warning("Update handling failed: %s", error)
             except TelegramError as error:
                 logger.error("Telegram polling error: %s", error)
                 if should_run:
