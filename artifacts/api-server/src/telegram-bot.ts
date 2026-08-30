@@ -38,9 +38,17 @@ const privateOnlyCommands = new Set([
   "/dashboard",
   "/لوحة",
 ]);
-const amazonHostPattern = /^amazon\.(?:[a-z]{2,3}|com\.[a-z]{2}|co\.[a-z]{2})$/i;
-const brandHostPattern =
-  /^(?:carrefour|jumia)\.(?:[a-z]{2,3}|com\.[a-z]{2}|co\.[a-z]{2})$/i;
+const allowedLinkBrands = [
+  "carrefour",
+  "jumia",
+  "amazon",
+  "facebook",
+  "fb",
+  "fb.me",
+  "alarabiya",
+  "aljazeera",
+  "noon",
+] as const;
 const bannedTerms = [
   "سكس",
   "نيك",
@@ -154,17 +162,26 @@ function extractUrlHosts(text: string): string[] {
 }
 
 function isAllowedLinkHost(host: string): boolean {
-  if (brandHostPattern.test(host) || amazonHostPattern.test(host)) return true;
-  return [
-    "facebook.com",
-    "fb.com",
-    "fb.me",
-    "alarabiya.net",
-    "alarabiya.com",
-    "aljazeera.net",
-    "aljazeera.com",
-    "noon.com",
-  ].some((root) => host === root || host.endsWith(`.${root}`));
+  const labels = host.split(".").filter(Boolean);
+  return allowedLinkBrands.some((brand) => {
+    const brandLabels = brand.split(".");
+    for (let brandStart = 0; brandStart <= labels.length - brandLabels.length; brandStart += 1) {
+      if (labels.slice(brandStart, brandStart + brandLabels.length).join(".") !== brand) {
+        continue;
+      }
+      const suffix = labels.slice(brandStart + brandLabels.length);
+      if (suffix.length === 0) return true;
+      if (suffix.length === 1 && /^[a-z]{2,3}$/i.test(suffix[0])) return true;
+      if (
+        suffix.length === 2 &&
+        /^(?:com|co|net|org)$/i.test(suffix[0]) &&
+        /^[a-z]{2}$/i.test(suffix[1])
+      ) {
+        return true;
+      }
+    }
+    return false;
+  });
 }
 
 function hasBlockedLink(text: string): boolean {
