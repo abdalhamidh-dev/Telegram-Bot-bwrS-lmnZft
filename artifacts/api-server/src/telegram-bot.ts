@@ -25,6 +25,16 @@ const scamPattern = /\b(?:free\s+(?:crypto|bitcoin|money)|guaranteed\s+profit|do
 const urlPattern = /(?:https?:\/\/|www\.|t\.me\/)/i;
 const invitePattern = /(?:t\.me\/(?:\+|joinchat)|telegram\.me\/joinchat)/i;
 
+function describeError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 const arabicMenu = {
   inline_keyboard: [
     [
@@ -478,7 +488,9 @@ class TelegramBot {
       chat_id: message.chat.id,
       message_id: message.message_id,
       text,
-      reply_markup: { inline_keyboard: [{ text: "العودة للقائمة", callback_data: "menu_home" }] },
+      reply_markup: {
+        inline_keyboard: [[{ text: "العودة للقائمة", callback_data: "menu_home" }]],
+      },
     });
   }
 
@@ -738,11 +750,14 @@ class TelegramBot {
             else if (update.message?.photo) await this.checkPhoto(update.message);
             else if (update.message) await this.handleMessage(update.message);
           } catch (error) {
-            logger.warn({ error, updateId: update.update_id }, "Telegram update handling failed");
+            logger.warn(
+              { err: describeError(error), updateId: update.update_id },
+              "Telegram update handling failed",
+            );
           }
         }
       } catch (error) {
-        logger.error({ error }, "Telegram polling error");
+        logger.error({ err: describeError(error) }, "Telegram polling error");
         if (this.running) await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
       }
     }
