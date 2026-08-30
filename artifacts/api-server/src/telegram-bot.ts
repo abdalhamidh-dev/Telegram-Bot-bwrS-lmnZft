@@ -22,8 +22,25 @@ const SIGHTENGINE_USER = "1290792300";
 const DASHBOARD_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
 const scamPattern = /\b(?:free\s+(?:crypto|bitcoin|money)|guaranteed\s+profit|double\s+your\s+(?:bitcoin|money)|claim\s+your\s+airdrop|investment\s+signal|verify\s+your\s+account|earn\s+\$?\d+)\b/i;
-const urlPattern = /(?:https?:\/\/|www\.|t\.me\/)/i;
+const urlPattern =
+  /(?:https?:\/\/|www\.|t\.me\/|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/|$))/i;
+const urlTokenPattern =
+  /\b(?:(?:https?:\/\/|www\.)[^\s<>()]+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s<>()]*)?)/gi;
 const invitePattern = /(?:t\.me\/(?:\+|joinchat)|telegram\.me\/joinchat)/i;
+const privateOnlyCommands = new Set([
+  "/help",
+  "/rules",
+  "/modstatus",
+  "/weather",
+  "/طقس",
+  "/translate",
+  "/ترجم",
+  "/dashboard",
+  "/لوحة",
+]);
+const amazonHostPattern = /^amazon\.(?:[a-z]{2,3}|com\.[a-z]{2}|co\.[a-z]{2})$/i;
+const brandHostPattern =
+  /^(?:carrefour|jumia)\.(?:[a-z]{2,3}|com\.[a-z]{2}|co\.[a-z]{2})$/i;
 
 function describeError(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -35,18 +52,38 @@ function describeError(error: unknown): string {
   }
 }
 
-const arabicMenu = {
-  inline_keyboard: [
-    [
-      { text: "قواعد الحماية", callback_data: "menu_rules" },
-      { text: "حالة البوت", callback_data: "menu_status" },
-    ],
-    [
-      { text: "المساعدة", callback_data: "menu_help" },
-      { text: "طريقة الحظر", callback_data: "menu_ban" },
-    ],
-  ],
-};
+function extractUrlHosts(text: string): string[] {
+  return (text.match(urlTokenPattern) ?? [])
+    .map((token) => {
+      try {
+        const normalized = /^https?:\/\//i.test(token) ? token : `https://${token}`;
+        return new URL(normalized).hostname.replace(/^www\./i, "").toLowerCase();
+      } catch {
+        return "";
+      }
+    })
+    .filter(Boolean);
+}
+
+function isAllowedLinkHost(host: string): boolean {
+  if (brandHostPattern.test(host) || amazonHostPattern.test(host)) return true;
+  return [
+    "facebook.com",
+    "fb.com",
+    "fb.me",
+    "alarabiya.net",
+    "alarabiya.com",
+    "aljazeera.net",
+    "aljazeera.com",
+    "noon.com",
+  ].some((root) => host === root || host.endsWith(`.${root}`));
+}
+
+function hasBlockedLink(text: string): boolean {
+  if (!urlPattern.test(text)) return false;
+  const hosts = extractUrlHosts(text);
+  return hosts.length === 0 || hosts.some((host) => !isAllowedLinkHost(host));
+}
 
 class TelegramApi {
   private readonly connectors = new ReplitConnectors();
@@ -351,6 +388,7 @@ class TelegramBot {
   >();
   private running = true;
   private botId = 0;
+  private botUsername = "";
 
   private async memberIsAdmin(chatId: number, userId: number): Promise<boolean> {
     const key = `${chatId}:${userId}`;
@@ -414,7 +452,7 @@ class TelegramBot {
     const sender = message.from ?? {};
     if (!text || sender.is_bot || sender.id === undefined) return null;
     if (await this.memberIsAdmin(message.chat.id, sender.id)) return null;
-    if (urlPattern.test(text)) return "link";
+    if (hasBlockedLink(text)) return "link";
     if (looksLikeSpam(text) || this.isFlood(message.chat.id, sender.id, text)) return "spam";
     return null;
   }
@@ -481,16 +519,81 @@ class TelegramBot {
     return `أهلاً بك يا ${firstName}!\n\nأنا بوت حماية المجموعات. اختر من القائمة ما تريد معرفته:`;
   }
 
-  private async editMenuMessage(callback: TelegramObject, text: string) {
+  private menuKeyboard(groupChatId?: number): TelegramObject {
+    const rows = [
+      [
+        { text: "قواعد الحماية", callback_data: "menu_rules" },
+        { text: "حالة البوت", callback_data: "menu_status" },
+      ],
+      [
+        { text: "المساعدة", callback_data: "menu_help" },
+        { text: "طريقة الحظر", callback_data: "menu_ban" },
+      ],
+    ];
+    if (groupChatId !== undefined) {
+      rows.unshift([
+        { text: "فتح إعدادات المجموعة", callback_data: `menu_settings:${groupChatId}` },
+      ]);
+    }
+    return { inline_keyboard: rows };
+  }
+
+  private privateSettingsUrl(groupChatId: number): string {
+    return `https://t.me/${this.botUsername}?start=settings_${groupChatId}`;
+  }
+
+  private async sendGroupSettingsHandoff(message: TelegramMessage) {
+    const userId = message.from?.id;
+    if (userId === undefined) return;
+    const groupChatId = message.chat.id as number;
+    const dashboard = await this.dashboardUrl(groupChatId);
+    try {
+      await this.sendMessage(
+        userId,
+        `إعدادات المجموعة متاحة في الخاص لمدة 24 ساعة:\n${dashboard}\n\nلا تشارك هذا الرابط مع الآخرين.`,
+        undefined,
+        { inline_keyboard: [[{ text: "فتح الإعدادات", url: dashboard }]] },
+      );
+    } catch (error) {
+      logger.info(
+        { err: describeError(error), groupChatId, userId },
+        "Private settings handoff requires the user to start the bot",
+      );
+      await this.sendMessage(
+        groupChatId,
+        "افتح المحادثة الخاصة مع البوت لإدارة إعدادات المجموعة.",
+        message.message_id,
+        {
+          inline_keyboard: [
+            [{ text: "فتح المحادثة الخاصة", url: this.privateSettingsUrl(groupChatId) }],
+          ],
+        },
+      );
+    }
+  }
+
+  private async sendPrivateCommand(
+    message: TelegramMessage,
+    text: string,
+    replyMarkup?: TelegramObject,
+  ) {
+    const userId = message.from?.id;
+    if (userId === undefined) return;
+    await this.sendMessage(userId, text, undefined, replyMarkup);
+  }
+
+  private async editMenuMessage(
+    callback: TelegramObject,
+    text: string,
+    replyMarkup: TelegramObject = this.menuKeyboard(),
+  ) {
     const message = callback.message ?? {};
     if (!message.chat?.id || !message.message_id) return;
     await this.api.call("editMessageText", {
       chat_id: message.chat.id,
       message_id: message.message_id,
       text,
-      reply_markup: {
-        inline_keyboard: [[{ text: "العودة للقائمة", callback_data: "menu_home" }]],
-      },
+      reply_markup: replyMarkup,
     });
   }
 
@@ -499,8 +602,34 @@ class TelegramBot {
     const chat = callback.message?.chat;
     if (!chat?.id) return;
     const data = callback.data;
+    const settingsMatch = typeof data === "string" ? data.match(/^menu_settings:(-?\d+)$/) : null;
+    if (settingsMatch) {
+      const groupChatId = Number(settingsMatch[1]);
+      const userId = callback.from?.id;
+      if (
+        chat.type !== "private" ||
+        userId === undefined ||
+        !Number.isSafeInteger(groupChatId) ||
+        !(await this.memberIsAdmin(groupChatId, userId))
+      ) {
+        await this.sendMessage(chat.id, "إعدادات المجموعة متاحة لمالك المجموعة ومشرفيها فقط.");
+        return;
+      }
+      const dashboard = await this.dashboardUrl(groupChatId);
+      await this.sendMessage(
+        chat.id,
+        `إعدادات المجموعة متاحة لمدة 24 ساعة:\n${dashboard}\n\nلا تشارك هذا الرابط مع الآخرين.`,
+        undefined,
+        { inline_keyboard: [[{ text: "فتح لوحة الإعدادات", url: dashboard }]] },
+      );
+      return;
+    }
     if (data === "menu_home") {
-      await this.editMenuMessage(callback, this.menuText(callback.from?.first_name ?? "صديقي"));
+      await this.editMenuMessage(
+        callback,
+        this.menuText(callback.from?.first_name ?? "صديقي"),
+        this.menuKeyboard(),
+      );
     } else if (data === "menu_rules") {
       await this.editMenuMessage(
         callback,
@@ -549,25 +678,69 @@ class TelegramBot {
     const command = commandName(text);
     const args = commandArgs(text);
     const firstName = message.from?.first_name ?? "there";
+    const inGroup = isGroup(message);
+    const senderId = message.from?.id as number | undefined;
     const saveSettings = async (values: TelegramObject = {}) => {
-      if (isGroup(message)) {
+      if (inGroup) {
         await updateSettings(chatId, {
           title: message.chat.title,
           ...values,
         });
       }
     };
+    const sendCommandResponse = async (responseText: string, replyMarkup?: TelegramObject) => {
+      if (inGroup) {
+        await this.sendPrivateCommand(message, responseText, replyMarkup);
+      } else {
+        await this.sendMessage(chatId, responseText, replyTo, replyMarkup);
+      }
+    };
 
     if (command === "/start") {
-      await saveSettings();
-      await this.sendMessage(chatId, this.menuText(firstName), replyTo, arabicMenu);
+      if (inGroup) {
+        if (senderId === undefined || !(await this.memberIsAdmin(chatId, senderId))) return;
+        await this.sendGroupSettingsHandoff(message);
+        return;
+      }
+      const settingsMatch = args.match(/^settings_(-?\d+)$/);
+      if (settingsMatch) {
+        const groupChatId = Number(settingsMatch[1]);
+        if (
+          !Number.isSafeInteger(groupChatId) ||
+          senderId === undefined ||
+          !(await this.memberIsAdmin(groupChatId, senderId))
+        ) {
+          await this.sendMessage(
+            chatId,
+            "لا يمكن فتح إعدادات هذه المجموعة إلا لمالكها أو أحد مشرفيها.",
+            replyTo,
+          );
+          return;
+        }
+        await ensureSettings(groupChatId);
+        const dashboard = await this.dashboardUrl(groupChatId);
+        await this.sendMessage(
+          chatId,
+          "تم نقل إعدادات المجموعة إلى الخاص. يمكنك فتح لوحة الإدارة من الزر التالي:",
+          replyTo,
+          {
+            inline_keyboard: [
+              [{ text: "فتح لوحة إعدادات المجموعة", url: dashboard }],
+              [{ text: "إعادة إرسال رابط الإعدادات", callback_data: `menu_settings:${groupChatId}` }],
+            ],
+          },
+        );
+        return;
+      }
+      await this.sendMessage(chatId, this.menuText(firstName), replyTo, this.menuKeyboard());
       return;
     }
+    if (inGroup && privateOnlyCommands.has(command)) {
+      if (senderId === undefined || !(await this.memberIsAdmin(chatId, senderId))) return;
+    }
     if (command === "/help") {
-      await this.sendMessage(
-        chatId,
+      await sendCommandResponse(
         "الأوامر المتاحة:\n/start — فتح القائمة\n/help — عرض المساعدة\n/rules — عرض قواعد الحماية\n/modstatus — حالة الحماية\n/ban — حظر مستخدم بالرد على رسالته\n/weather Cairo — حالة الطقس\n/translate en مرحباً — ترجمة نص\n/dashboard — لوحة المشرف\n/alerts on|off — إعداد التنبيهات الخارجية",
-        replyTo,
       );
       return;
     }
@@ -582,7 +755,6 @@ class TelegramBot {
         callerId === undefined ||
         !(await this.memberIsAdmin(chatId, callerId))
       ) {
-        await this.sendMessage(chatId, "هذا الأمر متاح لمشرفي المجموعة فقط.", replyTo);
         return;
       }
       if (!target?.id) {
@@ -611,10 +783,8 @@ class TelegramBot {
       return;
     }
     if (command === "/rules") {
-      await this.sendMessage(
-        chatId,
+      await sendCommandResponse(
         "قواعد الحماية:\n• حذف الروابط والرسائل المزعجة\n• فحص الصور غير اللائقة\n• منع تكرار الرسائل والإغراق\n• تجاهل رسائل المشرفين والبوتات",
-        replyTo,
       );
       return;
     }
@@ -623,7 +793,7 @@ class TelegramBot {
       const status = await this.botCanDelete(chatId)
         ? "نشطة — لدي صلاحية حذف الرسائل"
         : "قيد الانتظار — أضفني كمشرف مع صلاحية حذف الرسائل";
-      await this.sendMessage(chatId, `حالة الحماية: ${status}.`, replyTo);
+      await sendCommandResponse(`حالة الحماية: ${status}.`);
       return;
     }
     if (command === "/weather" || command === "/طقس") {
@@ -631,15 +801,13 @@ class TelegramBot {
       if (!location) location = (await getSettings(chatId))?.weatherLocation ?? "Cairo";
       try {
         const weather = await lookupWeather(location);
-        await this.sendMessage(
-          chatId,
+        await sendCommandResponse(
           `الطقس الآن في ${weather.location}:\n🌡️ الحرارة: ${weather.temperature}${weather.unit}\n🤍 الحالة: ${weather.description}\n💧 الرطوبة: ${weather.humidity}%\n💨 سرعة الرياح: ${weather.windSpeed} كم/س`,
-          replyTo,
         );
         await saveSettings({ weatherLocation: location });
       } catch (error) {
         logger.warn({ error, chatId }, "Weather command failed");
-        await this.sendMessage(chatId, "تعذر الحصول على حالة الطقس حالياً.", replyTo);
+        await sendCommandResponse("تعذر الحصول على حالة الطقس حالياً.");
       }
       return;
     }
@@ -652,37 +820,33 @@ class TelegramBot {
         sourceText = targetMatch[2];
       }
       if (!sourceText) {
-        await this.sendMessage(
-          chatId,
+        await sendCommandResponse(
           "اكتب النص بعد الأمر أو استخدم الأمر بالرد على رسالة.\nمثال: /translate en مرحباً",
-          replyTo,
         );
         return;
       }
       try {
         const translated = await translateText(sourceText.slice(0, 500), target);
-        await this.sendMessage(chatId, `الترجمة (${target}):\n${translated}`, replyTo);
+        await sendCommandResponse(`الترجمة (${target}):\n${translated}`);
       } catch (error) {
         logger.warn({ error, chatId }, "Translation command failed");
-        await this.sendMessage(chatId, "تعذرت الترجمة حالياً.", replyTo);
+        await sendCommandResponse("تعذرت الترجمة حالياً.");
       }
       return;
     }
     if (command === "/dashboard" || command === "/لوحة") {
-      if (!isGroup(message)) {
-        await this.sendMessage(chatId, "هذا الأمر متاح داخل المجموعات فقط.", replyTo);
-        return;
-      }
-      if (message.from?.id === undefined || !(await this.memberIsAdmin(chatId, message.from.id))) {
-        await this.sendMessage(chatId, "هذا الأمر متاح لمشرفي المجموعة فقط.", replyTo);
+      if (!inGroup) {
+        await this.sendMessage(
+          chatId,
+          "اطلب إعدادات المجموعة من داخلها باستخدام /start، وسيتم فتحها في الخاص.",
+          replyTo,
+        );
         return;
       }
       try {
-        const url = await this.dashboardUrl(chatId);
-        await this.sendMessage(chatId, `لوحة المشرف متاحة لمدة 24 ساعة:\n${url}\n\nلا تشارك هذا الرابط مع الآخرين.`, replyTo);
+        await this.sendGroupSettingsHandoff(message);
       } catch (error) {
         logger.warn({ error, chatId }, "Dashboard command failed");
-        await this.sendMessage(chatId, "تعذر إنشاء رابط لوحة المشرف حالياً.", replyTo);
       }
       return;
     }
@@ -692,7 +856,6 @@ class TelegramBot {
         return;
       }
       if (message.from?.id === undefined || !(await this.memberIsAdmin(chatId, message.from.id))) {
-        await this.sendMessage(chatId, "هذا الأمر متاح لمشرفي المجموعة فقط.", replyTo);
         return;
       }
       const enabled = ["on", "تشغيل", "نعم", "1"].includes(args.toLowerCase());
@@ -719,18 +882,29 @@ class TelegramBot {
   async start() {
     const bot = await this.api.call<TelegramObject>("getMe");
     this.botId = bot.id;
+    this.botUsername = String(bot.username ?? "");
     await this.api.call("deleteWebhook", { drop_pending_updates: false });
     await this.api.call("setMyCommands", {
+      commands: [],
+    });
+    await this.api.call("setMyCommands", {
+      scope: { type: "all_chat_administrators" },
+      commands: [
+        { command: "start", description: "فتح القائمة الرئيسية" },
+        { command: "ban", description: "حظر مستخدم بالرد على رسالته" },
+        { command: "dashboard", description: "لوحة المشرف" },
+        { command: "alerts", description: "إعداد التنبيهات" },
+      ],
+    });
+    await this.api.call("setMyCommands", {
+      scope: { type: "all_private_chats" },
       commands: [
         { command: "start", description: "فتح القائمة الرئيسية" },
         { command: "help", description: "عرض المساعدة" },
         { command: "rules", description: "عرض قواعد الحماية" },
         { command: "modstatus", description: "حالة الحماية" },
-        { command: "ban", description: "حظر مستخدم بالرد على رسالته" },
         { command: "weather", description: "عرض حالة الطقس" },
         { command: "translate", description: "ترجمة نص" },
-        { command: "dashboard", description: "لوحة المشرف" },
-        { command: "alerts", description: "إعداد التنبيهات" },
       ],
     });
     logger.info({ username: bot.username, id: bot.id }, "Telegram bot connected");

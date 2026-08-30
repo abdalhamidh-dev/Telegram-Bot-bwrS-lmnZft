@@ -41,13 +41,15 @@ A TypeScript/Node.js Telegram group bot that connects securely to Telegram and r
 
 ## Product
 
-- Responds to `/start`, `/help`, `/rules`, `/modstatus`, and reply-based `/ban`.
-- Removes links, obvious scam messages, repeated flood messages, and aggressive all-caps spam when it has Telegram delete permission.
+- Responds to `/start`, `/help`, `/rules`, `/modstatus`, and reply-based `/ban`; group settings and informational responses are delivered privately to administrators.
+- Removes non-allowlisted links, obvious scam messages, repeated flood messages, and aggressive all-caps spam when it has Telegram delete permission.
 - Scans group photos with Sightengine `nudity-2.0` and removes images when `sexual_display` or `erotica` exceeds 50%.
 - Lets group administrators ban a user by replying to that user's message with `/ban`.
 - Supports `/weather Cairo` or `/طقس القاهرة` using live weather data.
 - Supports `/translate en مرحباً` or `/ترجم en مرحباً`, including translating a replied-to message.
-- Lets group administrators request a 24-hour dashboard link with `/dashboard` or `/لوحة`.
+- Lets group administrators request a 24-hour dashboard link with `/dashboard` or `/لوحة`; the settings handoff opens in the administrator's private chat.
+- Allows only Carrefour, Jumia, Amazon, Facebook, Al Arabiya News, Al Jazeera News, and Noon domains through the link filter.
+- Publishes the command menu to group administrators and private chats, while leaving it hidden from regular group members.
 - Stores moderation events and supports external webhook alerts controlled by `/alerts on|off` or the dashboard.
 - Never moderates group admins.
 
