@@ -1,8 +1,8 @@
-modules = ["nodejs-24", "python-base-3.13", "postgresql-16"]
+modules = ["nodejs-24", "postgresql-16"]
 
 [deployment]
 router = "application"
-deploymentTarget = "autoscale"
+deploymentTarget = "vm"
 
 [deployment.postBuild]
 args = ["pnpm", "store", "prune"]
@@ -18,18 +18,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "Telegram Group Bot"
-
-[[workflows.workflow]]
-name = "Telegram Group Bot"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python3 group-bot/bot.py"
-
-[workflows.workflow.metadata]
-outputType = "console"
+args = "artifacts/api-server: API Server"
 
 [agent]
 stack = "PNPM_WORKSPACE"

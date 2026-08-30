@@ -1,10 +1,10 @@
 # Telegram Bot
 
-A Python Telegram group bot that connects securely to Telegram and removes obvious spam while keeping group administration in the hands of human admins.
+A TypeScript/Node.js Telegram group bot that connects securely to Telegram and removes obvious spam while keeping group administration in the hands of human admins.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- `pnpm --filter @workspace/api-server run dev` — run the API server, dashboard, and Telegram bot together on port 8080
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
@@ -22,8 +22,8 @@ A Python Telegram group bot that connects securely to Telegram and removes obvio
 
 ## Where things live
 
-- `group-bot/bot.py` — Python polling loop, group moderation rules, and command handlers.
-- `group-bot/telegram_bridge.mjs` — small authenticated connector bridge used by the Python runtime.
+- `artifacts/api-server/src/index.ts` — single entry point that starts Express and Telegram polling together.
+- `artifacts/api-server/src/telegram-bot.ts` — Node.js Telegram polling loop, moderation rules, and command handlers.
 - `artifacts/api-server/src/routes/health.ts` — API health check.
 - `artifacts/api-server/src/routes/bot.ts` — database-backed bot settings/events, weather, translation, alerts, and dashboard-token APIs.
 - `artifacts/api-server/src/routes/dashboard.ts` — time-limited Arabic admin dashboard.
@@ -32,10 +32,11 @@ A Python Telegram group bot that connects securely to Telegram and removes obvio
 ## Architecture decisions
 
 - Telegram calls use the Replit-managed Telegram connection; bot credentials never enter application code or chat.
-- Moderation logic runs in Python, while the bridge keeps the authenticated Replit connector in a local Node process because the Python connector package is unavailable in this runtime.
+- Moderation logic and Telegram polling run in TypeScript/Node.js in the same process as the dashboard API.
+- The Node process uses the Replit-managed Telegram connector directly; no Python runtime or subprocess bridge is required.
 - The bot uses long polling so it works immediately without requiring a public webhook URL.
 - Update offsets and moderation caches are held in memory; group settings and moderation events are persisted in PostgreSQL.
-- The Python process calls the API over localhost using `SESSION_SECRET`; the secret is never logged or placed in Telegram messages.
+- Internal bot endpoints use `SESSION_SECRET`; the secret is never logged or placed in Telegram messages.
 - Weather uses Open-Meteo without an API key. Translation uses MyMemory without an API key. External alerts use an administrator-configured HTTPS webhook.
 
 ## Product
@@ -62,6 +63,7 @@ _Populate as you build — explicit user instructions worth remembering across s
 - Image scanning needs the `SIGHTENGINE_SECRET` and `TELEGRAM_BOT_TOKEN` secrets; both are stored outside the source code.
 - Bot-to-API features need `SESSION_SECRET`; it is already available as a secure environment secret.
 - The dashboard link is intentionally time-limited. Configure `DASHBOARD_PUBLIC_URL` if the bot should send a custom public base URL; otherwise it uses the Replit development domain.
+- Deployment is configured as an always-on VM because Telegram long polling must remain active while the dashboard is served.
 
 ## Pointers
 
