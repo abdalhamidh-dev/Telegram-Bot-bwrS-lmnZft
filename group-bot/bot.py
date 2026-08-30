@@ -11,6 +11,7 @@ import time
 from collections import defaultdict, deque
 from typing import Any
 from urllib import error as urllib_error
+from urllib.parse import quote
 from urllib import request as urllib_request
 
 
@@ -24,6 +25,7 @@ POLL_TIMEOUT_SECONDS = 25
 RETRY_DELAY_SECONDS = 5
 ADMIN_CACHE_SECONDS = 60
 FLOOD_WINDOW_SECONDS = 12
+BOT_API_URL = os.getenv("BOT_API_URL", "http://127.0.0.1:8080/api").rstrip("/")
 
 SCAM_PATTERN = re.compile(
     r"\b(?:free\s+(?:crypto|bitcoin|money)|guaranteed\s+profit|"
@@ -52,6 +54,10 @@ ARABIC_MENU = {
 
 
 class TelegramError(RuntimeError):
+    pass
+
+
+class BotServiceError(RuntimeError):
     pass
 
 
@@ -105,8 +111,109 @@ class TelegramBridge:
                 self.process.kill()
 
 
+class BotServiceClient:
+    """Connects the Python runtime to the database-backed API service."""
+
+    def __init__(self) -> None:
+        self.base_url = BOT_API_URL
+        self.secret = os.getenv("SESSION_SECRET")
+
+    def call(
+        self,
+        path: str,
+        method: str = "GET",
+        body: dict[str, Any] | None = None,
+    ) -> Any:
+        if not self.secret:
+            raise BotServiceError("SESSION_SECRET is not configured")
+
+        payload = None
+        headers = {
+            "Accept": "application/json",
+            "X-Bot-Secret": self.secret,
+        }
+        if body is not None:
+            payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+
+        api_request = urllib_request.Request(
+            f"{self.base_url}{path}",
+            data=payload,
+            headers=headers,
+            method=method,
+        )
+        try:
+            with urllib_request.urlopen(api_request, timeout=8) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except (urllib_error.HTTPError, urllib_error.URLError, json.JSONDecodeError) as error:
+            raise BotServiceError(f"Bot API request failed: {error}") from error
+
+        if isinstance(result, dict) and result.get("error"):
+            raise BotServiceError(str(result["error"]))
+        return result
+
+    def update_settings(self, chat_id: int, **settings: Any) -> dict[str, Any]:
+        result = self.call(
+            "/bot/settings",
+            method="POST",
+            body={"chatId": chat_id, **settings},
+        )
+        return result if isinstance(result, dict) else {}
+
+    def get_settings(self, chat_id: int) -> dict[str, Any]:
+        result = self.call(f"/bot/settings?chat_id={chat_id}")
+        return result if isinstance(result, dict) else {}
+
+    def record_event(self, chat_id: int, event_type: str, **details: Any) -> None:
+        self.call(
+            "/bot/events",
+            method="POST",
+            body={
+                "chatId": chat_id,
+                "eventType": event_type,
+                "messageId": details.pop("message_id", None),
+                "userId": details.pop("user_id", None),
+                "username": details.pop("username", None),
+                "details": details,
+            },
+        )
+
+    def create_dashboard_token(self, chat_id: int) -> str:
+        result = self.call(
+            "/bot/dashboard-token",
+            method="POST",
+            body={"chatId": chat_id},
+        )
+        url = result.get("dashboardUrl") if isinstance(result, dict) else None
+        if not isinstance(url, str):
+            raise BotServiceError("Dashboard URL was not returned")
+        return url
+
+    def weather(self, location: str, language: str = "ar") -> dict[str, Any]:
+        result = self.call(
+            f"/bot/weather?location={quote(location)}&language={language}",
+        )
+        return result if isinstance(result, dict) else {}
+
+    def translate(self, text: str, target: str = "ar") -> str:
+        result = self.call(
+            "/bot/translate",
+            method="POST",
+            body={"text": text, "target": target},
+        )
+        translated = result.get("translatedText") if isinstance(result, dict) else None
+        if not isinstance(translated, str):
+            raise BotServiceError("Translation was not returned")
+        return translated
+
+
 def command_name(text: str) -> str:
     return text.split(maxsplit=1)[0].split("@", maxsplit=1)[0].lower()
+
+
+def command_args(text: str) -> str:
+    parts = text.split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
 
 
 def is_group(message: dict[str, Any]) -> bool:
@@ -143,9 +250,15 @@ def looks_like_spam(text: str) -> bool:
 
 
 class GroupModerator:
-    def __init__(self, api: TelegramBridge, bot_id: int) -> None:
+    def __init__(
+        self,
+        api: TelegramBridge,
+        bot_id: int,
+        service: BotServiceClient | None = None,
+    ) -> None:
         self.api = api
         self.bot_id = bot_id
+        self.service = service
         self.admin_cache: dict[tuple[int, int], tuple[float, bool]] = {}
         self.bot_permission_cache: dict[
             int, tuple[float, bool, bool]
@@ -253,10 +366,26 @@ class GroupModerator:
                 chat_id,
                 message["message_id"],
             )
+            sender = message.get("from") or {}
+            self.record_event(
+                chat_id,
+                reason,
+                message_id=message["message_id"],
+                user_id=sender.get("id"),
+                username=sender.get("username"),
+            )
             return reason
         except TelegramError as error:
             logger.warning("Could not remove message: %s", error)
             return None
+
+    def record_event(self, chat_id: int, event_type: str, **details: Any) -> None:
+        if not self.service:
+            return
+        try:
+            self.service.record_event(chat_id, event_type, **details)
+        except BotServiceError as error:
+            logger.warning("Could not record %s event: %s", event_type, error)
 
 
 def can_restrict_members(member: dict[str, Any]) -> bool:
@@ -497,6 +626,14 @@ def check_photo(
             chat_id,
             message["message_id"],
         )
+        moderator.record_event(
+            chat_id,
+            "image_nudity",
+            message_id=message["message_id"],
+            user_id=sender_id,
+            username=sender.get("username"),
+            reason="Sightengine nudity-2.0 threshold exceeded",
+        )
     except (TelegramError, ImageModerationError) as error:
         logger.warning("Could not scan Telegram image: %s", error)
 
@@ -514,8 +651,24 @@ def handle_message(
     command = command_name(text)
     first_name = (message.get("from") or {}).get("first_name", "there")
     reply_to = message.get("message_id")
+    args = command_args(text)
+
+    def save_group_settings(**settings: Any) -> bool:
+        if not moderator.service or not is_group(message):
+            return False
+        try:
+            moderator.service.update_settings(
+                chat_id,
+                title=(message.get("chat") or {}).get("title"),
+                **settings,
+            )
+            return True
+        except BotServiceError as error:
+            logger.warning("Could not save group settings: %s", error)
+            return False
 
     if command == "/start":
+        save_group_settings()
         send_message(
             api,
             chat_id,
@@ -529,9 +682,13 @@ def handle_message(
         send_message(
             api,
             chat_id,
-            "الأوامر المتاحة:\n/start — بدء البوت\n/help — عرض المساعدة\n"
+            "الأوامر المتاحة:\n/start — فتح القائمة\n/help — عرض المساعدة\n"
             "/rules — عرض قواعد الحماية\n/modstatus — حالة الحماية\n"
-            "/ban — حظر مستخدم بالرد على رسالته\n\n"
+            "/ban — حظر مستخدم بالرد على رسالته\n"
+            "/weather — حالة الطقس، مثال: /weather Cairo\n"
+            "/translate — ترجمة نص، مثال: /translate en مرحباً\n"
+            "/dashboard — رابط لوحة المشرف\n"
+            "/alerts — تشغيل أو إيقاف التنبيهات الخارجية\n\n"
             "استخدم /start لفتح القائمة التفاعلية.",
             reply_to,
         )
@@ -571,6 +728,13 @@ def handle_message(
                 {"chat_id": chat_id, "user_id": target_user["id"]},
             )
             send_message(api, chat_id, "تم حظر المستخدم بنجاح.", reply_to)
+            moderator.record_event(
+                chat_id,
+                "ban",
+                message_id=reply_to,
+                user_id=target_user["id"],
+                username=target_user.get("username"),
+            )
         except TelegramError as error:
             logger.warning("Could not ban user in chat %s: %s", chat_id, error)
             send_message(
@@ -585,19 +749,138 @@ def handle_message(
         send_message(
             api,
             chat_id,
-            "Moderation removes obvious scam links, repeated flood messages, "
-            "and aggressive all-caps spam. Group admins are always ignored.",
+            "قواعد الحماية:\n"
+            "• حذف الروابط والرسائل المزعجة\n"
+            "• فحص الصور غير اللائقة\n"
+            "• منع تكرار الرسائل والإغراق\n"
+            "• تجاهل رسائل المشرفين والبوتات",
             reply_to,
         )
         return
 
     if command == "/modstatus":
+        save_group_settings()
         status = (
-            "active — the bot has permission to delete messages"
+            "نشطة — لدي صلاحية حذف الرسائل"
             if moderator.bot_can_delete(chat_id)
-            else "waiting — make the bot a group administrator with permission to delete messages"
+            else "قيد الانتظار — أضفني كمشرف مع صلاحية حذف الرسائل"
         )
-        send_message(api, chat_id, f"Moderation is {status}.", reply_to)
+        send_message(api, chat_id, f"حالة الحماية: {status}.", reply_to)
+        return
+
+    if command in {"/weather", "/طقس"}:
+        location = args
+        if not location and moderator.service:
+            try:
+                location = moderator.service.get_settings(chat_id).get("weatherLocation") or ""
+            except BotServiceError:
+                location = ""
+        location = location or "Cairo"
+        try:
+            if not moderator.service:
+                raise BotServiceError("Bot API is not available")
+            weather = moderator.service.weather(location)
+            send_message(
+                api,
+                chat_id,
+                f"الطقس الآن في {weather.get('location', location)}:\n"
+                f"🌡️ الحرارة: {weather.get('temperature', '—')}{weather.get('unit', '°C')}\n"
+                f"🤍 الحالة: {weather.get('description', 'غير معروفة')}\n"
+                f"💧 الرطوبة: {weather.get('humidity', '—')}%\n"
+                f"💨 سرعة الرياح: {weather.get('windSpeed', '—')} كم/س",
+                reply_to,
+            )
+            save_group_settings(weatherLocation=location)
+        except BotServiceError as error:
+            logger.warning("Weather command failed: %s", error)
+            send_message(api, chat_id, "تعذر الحصول على حالة الطقس حالياً.", reply_to)
+        return
+
+    if command in {"/translate", "/ترجم"}:
+        source_text = args
+        if message.get("reply_to_message"):
+            source_text = (
+                (message["reply_to_message"].get("text") or "")
+                if not source_text
+                else source_text
+            )
+        target = "ar"
+        if source_text:
+            parts = source_text.split(maxsplit=1)
+            if len(parts) == 2 and re.fullmatch(r"[a-zA-Z]{2}", parts[0]):
+                target, source_text = parts[0].lower(), parts[1]
+        if not source_text:
+            send_message(
+                api,
+                chat_id,
+                "اكتب النص بعد الأمر أو استخدم الأمر بالرد على رسالة.\n"
+                "مثال: /translate en مرحباً",
+                reply_to,
+            )
+            return
+        try:
+            if not moderator.service:
+                raise BotServiceError("Bot API is not available")
+            translated = moderator.service.translate(source_text[:500], target)
+            send_message(api, chat_id, f"الترجمة ({target}):\n{translated}", reply_to)
+        except BotServiceError as error:
+            logger.warning("Translation command failed: %s", error)
+            send_message(api, chat_id, "تعذرت الترجمة حالياً.", reply_to)
+        return
+
+    if command in {"/dashboard", "/لوحة"}:
+        if not is_group(message):
+            send_message(api, chat_id, "هذا الأمر متاح داخل المجموعات فقط.", reply_to)
+            return
+        caller_id = (message.get("from") or {}).get("id")
+        if caller_id is None or not moderator.member_is_admin(chat_id, caller_id):
+            send_message(api, chat_id, "هذا الأمر متاح لمشرفي المجموعة فقط.", reply_to)
+            return
+        try:
+            if not moderator.service:
+                raise BotServiceError("Bot API is not available")
+            dashboard_url = moderator.service.create_dashboard_token(chat_id)
+            send_message(
+                api,
+                chat_id,
+                "لوحة المشرف متاحة لمدة 24 ساعة:\n"
+                f"{dashboard_url}\n\n"
+                "لا تشارك هذا الرابط مع الآخرين.",
+                reply_to,
+            )
+        except BotServiceError as error:
+            logger.warning("Dashboard command failed: %s", error)
+            send_message(api, chat_id, "تعذر إنشاء رابط لوحة المشرف حالياً.", reply_to)
+        return
+
+    if command in {"/alerts", "/تنبيهات"}:
+        if not is_group(message):
+            send_message(api, chat_id, "هذا الأمر متاح داخل المجموعات فقط.", reply_to)
+            return
+        caller_id = (message.get("from") or {}).get("id")
+        if caller_id is None or not moderator.member_is_admin(chat_id, caller_id):
+            send_message(api, chat_id, "هذا الأمر متاح لمشرفي المجموعة فقط.", reply_to)
+            return
+        enabled = args.lower() in {"on", "تشغيل", "نعم", "1"}
+        disabled = args.lower() in {"off", "إيقاف", "لا", "0"}
+        if not enabled and not disabled:
+            send_message(
+                api,
+                chat_id,
+                "استخدم /alerts on أو /alerts off.\n"
+                "لإضافة رابط تنبيهات خارجي استخدم لوحة المشرف.",
+                reply_to,
+            )
+            return
+        if save_group_settings(alertsEnabled=enabled):
+            send_message(
+                api,
+                chat_id,
+                "تم تشغيل التنبيهات الخارجية." if enabled else "تم إيقاف التنبيهات الخارجية.",
+                reply_to,
+            )
+        else:
+            send_message(api, chat_id, "تعذر حفظ إعدادات التنبيهات.", reply_to)
         return
 
     if is_group(message):
@@ -615,7 +898,7 @@ def handle_message(
     send_message(
         api,
         chat_id,
-        f"You said: {text}\n\nAdd me to a group and I’ll help moderate obvious spam.",
+        f"قلت: {text}\n\nأضفني إلى مجموعة وسأساعد في الحماية من الرسائل المزعجة.",
         reply_to,
     )
 
@@ -643,6 +926,10 @@ def run() -> None:
                     {"command": "rules", "description": "عرض قواعد الحماية"},
                     {"command": "modstatus", "description": "حالة الحماية"},
                     {"command": "ban", "description": "حظر مستخدم بالرد على رسالته"},
+                    {"command": "weather", "description": "عرض حالة الطقس"},
+                    {"command": "translate", "description": "ترجمة نص"},
+                    {"command": "dashboard", "description": "لوحة المشرف"},
+                    {"command": "alerts", "description": "إعداد التنبيهات"},
                 ]
             },
         )
@@ -652,7 +939,8 @@ def run() -> None:
             bot.get("id"),
         )
 
-        moderator = GroupModerator(api, bot["id"])
+        service = BotServiceClient()
+        moderator = GroupModerator(api, bot["id"], service)
         offset = 0
         while should_run:
             try:
@@ -661,7 +949,7 @@ def run() -> None:
                     {
                         "timeout": POLL_TIMEOUT_SECONDS,
                         "offset": offset + 1,
-                        "allowed_updates": ["message"],
+                        "allowed_updates": ["message", "callback_query"],
                     },
                 ) or []
                 for update in updates:
