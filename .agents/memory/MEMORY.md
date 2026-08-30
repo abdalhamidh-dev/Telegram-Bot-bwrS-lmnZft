@@ -1,0 +1,1 @@
+- [Telegram bot runtime lessons](telegram-bot-runtime.md) — keep inline keyboards nested and ensure only one polling process owns the bot.
