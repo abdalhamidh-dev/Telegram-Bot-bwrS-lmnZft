@@ -41,6 +41,74 @@ const privateOnlyCommands = new Set([
 const amazonHostPattern = /^amazon\.(?:[a-z]{2,3}|com\.[a-z]{2}|co\.[a-z]{2})$/i;
 const brandHostPattern =
   /^(?:carrefour|jumia)\.(?:[a-z]{2,3}|com\.[a-z]{2}|co\.[a-z]{2})$/i;
+const bannedTerms = [
+  "سكس",
+  "نيك",
+  "زنا",
+  "لواط",
+  "سحاق",
+  "جنس",
+  "اباحي",
+  "porn",
+  "sex",
+  "fuck",
+  "dick",
+  "pussy",
+  "كلب",
+  "حمار",
+  "غبي",
+  "حقير",
+  "تافه",
+  "قذر",
+  "قحبة",
+  "شرموطة",
+  "ابن الكلب",
+  "ابن الحرام",
+  "وسخ",
+  "زبالة",
+  "أهبل",
+  "معتوه",
+  "عاهر",
+  "انتحر",
+  "اقتل",
+  "سأقتلك",
+  "هدد",
+  "ابتزاز",
+  "ربح سريع",
+  "استثمر الآن",
+  "اضغط هنا",
+  "free money",
+  "earn money",
+  "password",
+  "كلمة السر",
+  "cvv",
+  "خازوق",
+  "سالب",
+  "طيزك",
+  "زب",
+  "كس",
+  "زبر",
+  "تهرش",
+  "فشخ",
+  "بوكسر",
+  "متناكة",
+  "خرم",
+  "كسم",
+  "لبوة",
+  "ينيك",
+  "شرموط",
+  "شراميط",
+  "متناكين",
+  "ماشيه",
+  "خول",
+  "خولات",
+  "سحاقية",
+  "دعارة",
+  "مناويك",
+  "كباريه",
+  "العادة السرية",
+  "ضرب عشرات",
+] as const;
 
 function describeError(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -50,6 +118,26 @@ function describeError(error: unknown): string {
   } catch {
     return String(error);
   }
+}
+
+function normalizeModerationText(text: string): string {
+  return text
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, "")
+    .replace(/[إأآٱ]/g, "ا")
+    .replace(/ى/g, "ي")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function hasBannedTerm(text: string): boolean {
+  const normalized = ` ${normalizeModerationText(text)} `;
+  return bannedTerms.some((term) => {
+    const normalizedTerm = normalizeModerationText(term);
+    return normalized.includes(` ${normalizedTerm} `);
+  });
 }
 
 function extractUrlHosts(text: string): string[] {
@@ -448,10 +536,11 @@ class TelegramBot {
   }
 
   private async removalReason(message: TelegramMessage): Promise<string | null> {
-    const text = String(message.text ?? "").trim();
+    const text = String(message.text ?? message.caption ?? "").trim();
     const sender = message.from ?? {};
     if (!text || sender.is_bot || sender.id === undefined) return null;
     if (await this.memberIsAdmin(message.chat.id, sender.id)) return null;
+    if (hasBannedTerm(text)) return "banned_word";
     if (hasBlockedLink(text)) return "link";
     if (looksLikeSpam(text) || this.isFlood(message.chat.id, sender.id, text)) return "spam";
     return null;
@@ -496,6 +585,16 @@ class TelegramBot {
     if (sender.is_bot || sender.id === undefined) return;
     if (await this.memberIsAdmin(message.chat.id, sender.id)) return;
     if (!(await this.botCanDelete(message.chat.id))) return;
+    const captionReason = await this.moderate(message);
+    if (captionReason) {
+      if (captionReason === "link") {
+        const mention = sender.username ? `@${sender.username}` : sender.first_name ?? "المستخدم";
+        await this.sendMessage(message.chat.id, `${mention} ممنوع إرسال الروابط!`);
+      } else if (captionReason === "banned_word") {
+        await this.sendMessage(message.chat.id, "⚠️ تم حذف رسالة تحتوي على كلمة محظورة.");
+      }
+      return;
+    }
     try {
       const largestPhoto = message.photo[message.photo.length - 1];
       const file = await this.api.call("getFile", { file_id: largestPhoto.file_id });
@@ -873,6 +972,8 @@ class TelegramBot {
       if (reason === "link") {
         const mention = message.from?.username ? `@${message.from.username}` : firstName;
         await this.sendMessage(chatId, `${mention} ممنوع إرسال الروابط!`);
+      } else if (reason === "banned_word") {
+        await this.sendMessage(chatId, "⚠️ تم حذف رسالة تحتوي على كلمة محظورة.");
       }
       return;
     }
