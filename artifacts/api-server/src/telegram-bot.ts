@@ -488,7 +488,10 @@ class TelegramBot {
         await this.api.call("getChatMember", { chat_id: chatId, user_id: userId }),
       );
     } catch (error) {
-      logger.warn({ error, chatId, userId }, "Could not inspect group member");
+      logger.warn(
+        { err: describeError(error), chatId, userId },
+        "Could not inspect group member",
+      );
     }
     this.adminCache.set(key, { expiresAt: Date.now() + ADMIN_CACHE_MS, value });
     return value;
@@ -507,7 +510,7 @@ class TelegramBot {
       canDelete = canDeleteMessages(member);
       canBan = canRestrictMembers(member);
     } catch (error) {
-      logger.warn({ error, chatId }, "Could not inspect bot permissions");
+      logger.warn({ err: describeError(error), chatId }, "Could not inspect bot permissions");
     }
     const value = { expiresAt: Date.now() + ADMIN_CACHE_MS, canDelete, canBan };
     this.permissionCache.set(chatId, value);
@@ -562,7 +565,10 @@ class TelegramBot {
       );
       return reason;
     } catch (error) {
-      logger.warn({ error, chatId: message.chat.id }, "Could not remove message");
+      logger.warn(
+        { err: describeError(error), chatId: message.chat.id },
+        "Could not remove message",
+      );
       return null;
     }
   }
@@ -610,7 +616,10 @@ class TelegramBot {
         reason: "Sightengine nudity-2.0 threshold exceeded",
       });
     } catch (error) {
-      logger.warn({ error, chatId: message.chat.id }, "Could not scan Telegram image");
+      logger.warn(
+        { err: describeError(error), chatId: message.chat.id },
+        "Could not scan Telegram image",
+      );
     }
   }
 
