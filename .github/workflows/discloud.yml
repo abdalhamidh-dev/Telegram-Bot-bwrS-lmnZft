@@ -3,7 +3,7 @@ name: Discloud Auto Deploy
 on:
   push:
     branches:
-      - main # استبدلها بـ master إذا كان اسم الفرع الرئيسي لديك master
+      - github
 
 jobs:
   deploy:
