@@ -21,7 +21,7 @@ const SIGHTENGINE_URL = "https://api.sightengine.com/1.0/check.json";
 const SIGHTENGINE_USER = "1290792300";
 const DASHBOARD_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
-const scamPattern = /\b(?:free\s+(?:crypto|bitcoin|money)|guaranteed\s+profit|double\s+your\s+(?:bitcoin|money)|claim\s+your\s+airdrop|investment\s+signal|verify\s+your\s+account|earn\s+\$?\d+)\b/i;
+const scamPattern = /\b(?:free\s+(?:crypto|bitcoin|money)|guaranteed\s+profit|double\s+your\s+(?:bitcoin|money)|claim\s+your\s+airdrop|investment\s+signal|verify\s+your\s+account|earn\s+\$?\d+)\b/;
 const urlPattern =
   /(?:https?:\/\/|www\.|t\.me\/|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/|$))/i;
 const urlTokenPattern =
@@ -415,7 +415,11 @@ async function downloadTelegramFile(filePath: string): Promise<ArrayBuffer> {
 
 async function imageHasNudity(bytes: ArrayBuffer): Promise<boolean> {
   const secret = process.env["SIGHTENGINE_SECRET"];
-  if (!secret) throw new Error("SIGHTENGINE_SECRET is not configured");
+  if (!secret) {
+    // If Sightengine secret is not configured, skip the nudity check instead of throwing.
+    logger.info("SIGHTENGINE_SECRET is not configured — skipping image nudity scan");
+    return false;
+  }
   const form = new FormData();
   form.append("models", "nudity-2.0");
   form.append("api_user", SIGHTENGINE_USER);
@@ -758,17 +762,17 @@ class TelegramBot {
     } else if (data === "menu_rules") {
       await this.editMenuMessage(
         callback,
-        "قواعد الحماية:\n• حذف الروابط والرسائل المزعجة\n• فحص الصور غير اللائقة\n• منع تكرار الرسائل والإغراق\n• تجاهل رسائل مشرفي المجموعة",
+        "قواعد الحماية:\n• حذف الروابط والرسائل المزعجة\n• فحص الصور غير اللائقة\n• منع تكرار الرسائل والإغراق\[...]",
       );
     } else if (data === "menu_help") {
       await this.editMenuMessage(
         callback,
-        "الأوامر المتاحة:\n/start — فتح القائمة\n/help — عرض المساعدة\n/rules — عرض قواعد الحماية\n/modstatus — حالة الحماية\n/ban — حظر مستخدم بالرد على رسالته\n/weather — حالة الطقس\n/translate — ترجمة نص\n/dashboard — لوحة المشرف",
+        "الأوامر المتاحة:\n/start — فتح القائمة\n/help — عرض المساعدة\n/rules — عرض قواعد الحماية\n/modstatus — حالة الحماية\n[...]",
       );
     } else if (data === "menu_ban") {
       await this.editMenuMessage(
         callback,
-        "لحظر مستخدم:\n1. تأكد أنك مشرف في المجموعة.\n2. اضغط مطولاً على رسالة المستخدم.\n3. اختر الرد، ثم اكتب /ban.\n\nيجب أن يكون لدي صلاحية حظر المستخدمين.",
+        "لحظر مستخدم:\n1. تأكد أنك مشرف في المجموعة.\n2. اضغط مطولاً على رسالة المستخدم.\n3. اختر الرد، ثم اكتب /ban.\n\nي[...]",
       );
     } else if (data === "menu_status") {
       const status =
@@ -865,8 +869,7 @@ class TelegramBot {
     }
     if (command === "/help") {
       await sendCommandResponse(
-        "الأوامر المتاحة:\n/start — فتح القائمة\n/help — عرض المساعدة\n/rules — عرض قواعد الحماية\n/modstatus — حالة الحماية\n/ban — حظر مستخدم بالرد على رسالته\n/weather Cairo — حالة الطقس\n/translate en مرحباً — ترجمة نص\n/dashboard — لوحة المشرف\n/alerts on|off — إعداد التنبيهات الخارجية",
-      );
+        "الأوامر المتاحة:\n/start — فتح القائمة\n/help — عرض المساعدة\n/rules — عرض قواعد الحماية\n/modstatus — حالة الحماية\n[...]");
       return;
     }
     if (command === "/ban") {
@@ -909,8 +912,7 @@ class TelegramBot {
     }
     if (command === "/rules") {
       await sendCommandResponse(
-        "قواعد الحماية:\n• حذف الروابط والرسائل المزعجة\n• فحص الصور غير اللائقة\n• منع تكرار الرسائل والإغراق\n• تجاهل رسائل المشرفين والبوتات",
-      );
+        "قواعد الحماية:\n• حذف الروابط والرسائل المزعجة\n• فحص الصور غير اللائقة\n• منع تكرار الرسائل والإغراق\[...]");
       return;
     }
     if (command === "/modstatus") {
@@ -927,7 +929,7 @@ class TelegramBot {
       try {
         const weather = await lookupWeather(location);
         await sendCommandResponse(
-          `الطقس الآن في ${weather.location}:\n🌡️ الحرارة: ${weather.temperature}${weather.unit}\n🤍 الحالة: ${weather.description}\n💧 الرطوبة: ${weather.humidity}%\n💨 سرعة الرياح: ${weather.windSpeed} كم/س`,
+          `الطقس الآن في ${weather.location}:\n🌡️ الحرارة: ${weather.temperature}${weather.unit}\n🤍 الحالة: ${weather.description}\n💧 الرطوبة: ${weather.[...]
         );
         await saveSettings({ weatherLocation: location });
       } catch (error) {
