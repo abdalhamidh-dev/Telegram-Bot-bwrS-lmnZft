@@ -3,7 +3,7 @@ name: Discloud Auto Deploy
 on:
   push:
     branches:
-     - github
+      - github
 
 jobs:
   deploy:
